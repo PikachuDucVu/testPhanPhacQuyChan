@@ -1,89 +1,90 @@
+import Bump from "bump-ts";
+import { Archetype, World } from "flat-ecs";
 import {
-  Color,
   createGameLoop,
   createStage,
   createViewport,
-  OrthoCamera,
   PolygonBatch,
   ShapeRenderer,
   Texture,
+  TextureRegion,
   ViewportInputHandler,
 } from "gdxts";
 import { Vector2 } from "gdxts/dist/lib/Vector2";
+import Walkable from "walkable";
+import { ChangeMapSystem } from "./ChangeMapSystem";
 import { Constants } from "./Constant";
-
-interface JoyStick {
-  origin: Vector2;
-  thumbPos: Vector2;
-  direction: Vector2;
-
-  touched: boolean;
-  move: boolean;
-  dragging: boolean;
-}
-
-function moveMainCharacter(
-  inputHandler: ViewportInputHandler,
-  joyStick: JoyStick,
-  posMainCharacter: Vector2,
-  camera: OrthoCamera
-) {
-  if (inputHandler.isTouched()) {
-    joyStick.origin.set(camera.position.x, camera.position.y);
-    joyStick.thumbPos.setVector(inputHandler.getTouchedWorldCoord());
-    joyStick.direction
-      .setVector(joyStick.thumbPos)
-      .subVector(joyStick.origin)
-      .nor();
-
-    if (
-      posMainCharacter.x > 0 &&
-      posMainCharacter.x < 10000 &&
-      posMainCharacter.y > -8000 &&
-      posMainCharacter.y < 2000
-    ) {
-      posMainCharacter.addVector(joyStick.direction.scale(20));
-    } else if (posMainCharacter.x < 0) {
-      posMainCharacter.x = 1;
-    } else if (posMainCharacter.y > 2000) {
-      posMainCharacter.y = 1999;
-    } else if (posMainCharacter.x > 10000) {
-      posMainCharacter.x = 9999;
-    } else if (posMainCharacter.y < -8000) {
-      posMainCharacter.y = -7999;
-    }
-  }
-}
+import { GameState } from "./dto/gameState";
+import { EnemyProcessingSystem } from "./enemy/EnemyProcessingSystem";
+import { EnemyRenderSystem } from "./enemy/EnemyRenderSystem";
+import { EnemySpawningSystem } from "./enemy/EnemySpawningSystem";
+import { MapRenderingSystem } from "./MapRenderingSystem";
+import MovementSystem from "./MovementSystem";
+import { ObstaclesSystem } from "./ObstaclesSystem";
+import PathFindingSystem from "./PathFindingSystem";
+import { JoyStick, PlayerMovementSystem } from "./player/PlayerMovementSystem";
+import { PlayerRenderSystem } from "./player/PlayerRenderSystem";
+import { BulletProcessingSystem } from "./player/skill/BulletProcessingSystem";
+import { BulletRenderSystem } from "./player/skill/BulletRenderSystem";
+import { BulletSpawningSystem } from "./player/skill/BulletSpawningSystem";
+import PursuitSystem from "./PursuitSystem";
+import { GameConfig } from "./ulis/currentMap";
+import { LayerMapRender } from "./ulis/layerMapRender";
+import { mapData } from "./ulis/mapData";
+import { Port } from "./ulis/port";
 
 export const init = async () => {
   const stage = createStage();
   const canvas = stage.getCanvas();
   const viewport = createViewport(
     canvas,
-    Constants.SCREEN_WIDTH,
-    Constants.SCREEN_HEIGHT
+    Constants.MAP_WIDTH,
+    Constants.MAP_HEIGHT + 20
   );
   const gl = viewport.getContext();
 
   const batch = new PolygonBatch(gl);
   const shapeRenderer = new ShapeRenderer(gl);
   const camera = viewport.getCamera();
-  const mapData = await fetch("./map.tmj").then((res) => res.json());
+  const world = new World();
 
-  const posMainCharacter = new Vector2(1000, 1000);
-  const posMap = mapData.layers.find((w: any) => w.name === "map").objects;
-  const mapImage: Texture[] = [];
-  const renderImage = new Map<number, Texture>();
+  const tileSets = await Texture.load(gl, "./tiles_dungeon_v1.1.png");
+  const tileSetsRegions = TextureRegion.splitTexture(tileSets, 20, 24);
 
-  for (let i = 0; i < posMap.length; i++) {
-    renderImage.set(i, await Texture.load(gl, `./fmg_tile_${i}.png`));
-  }
   gl.clearColor(0, 0, 0, 1);
 
   const inputHandler = new ViewportInputHandler(viewport);
 
-  const tempTouchedWorldCoord = new Vector2();
-  const tempDirection = new Vector2();
+  const gameConfig: GameConfig = {
+    mapNumber: 1,
+    changePreMap: false,
+    changeCurrentMap: true,
+    changeNextMap: false,
+  };
+
+  const port: Port = {
+    preMap: null,
+    spawn: null,
+    nextMap: null,
+  };
+  const mapData: mapData = {
+    map1: await fetch(`./01.tmj`).then((res) => res.json()),
+    map2: await fetch(`./02.tmj`).then((res) => res.json()),
+    map3: await fetch(`./03.tmj`).then((res) => res.json()),
+    map4: await fetch(`./04.tmj`).then((res) => res.json()),
+  };
+
+  port.spawn = mapData.map1.layers
+    .find((d: any) => d.name === "data")
+    .objects.find((s: any) => s.name === "spawn");
+
+  port.preMap = mapData.map1.layers
+    .find((d: any) => d.name === "data")
+    .objects.find((s: any) => s.name === "previousMap");
+
+  port.nextMap = mapData.map1.layers
+    .find((d: any) => d.name === "data")
+    .objects.find((s: any) => s.name === "nextMap");
 
   const joyStick: JoyStick = {
     origin: new Vector2(),
@@ -95,64 +96,85 @@ export const init = async () => {
     dragging: false,
   };
 
+  const layersMapRender: LayerMapRender = {
+    walls: mapData.map1.layers.find((w: any) => w.name === "walls").data,
+    layer1: mapData.map1.layers.find((w: any) => w.name === "layer1").data,
+    layer2: mapData.map1.layers.find((w: any) => w.name === "layer2").data,
+    obstacle: mapData.map1.layers.find((w: any) => w.name === "obstacles").data,
+  };
+  const rects: { x: number; y: number; width: number; height: number }[] = [];
+  const obstacles: { x: number; y: number; width: number; height: number }[] =
+    [];
+
+  for (let i = 0; i < Constants.MAP_GRID_COLS; i++) {
+    for (let j = 0; j < Constants.MAP_GRID_ROWS; j++) {
+      obstacles.push({
+        x: Constants.CELL_WIDTH * j,
+        y:
+          Constants.CELL_HEIGHT * Constants.MAP_GRID_ROWS -
+          Constants.CELL_HEIGHT * i,
+        width: Constants.CELL_WIDTH,
+        height: Constants.CELL_HEIGHT,
+      });
+    }
+  }
+  const OFFSET_TILE_MAP = 10;
+
+  const bumpWorld = Bump.newWorld(Constants.CELL_WIDTH);
+  const walkable = new Walkable(Constants.MAP_WIDTH, Constants.MAP_HEIGHT);
+
+  bumpWorld.add(
+    "player",
+    port.spawn.x - OFFSET_TILE_MAP / 2,
+    Constants.MAP_HEIGHT - port.spawn.y + OFFSET_TILE_MAP,
+    10,
+    10
+  );
+  const gameState: GameState = {
+    playerID: 0,
+    enemyIDs: [],
+    bulletIDs: [],
+  };
+
+  world.register("bumpWorld", bumpWorld);
+  world.register("walkable", walkable);
+  world.register("gameState", gameState);
+  world.register("inputHandler", inputHandler);
+  world.register("joyStick", joyStick);
+  world.register("shapeRenderer", shapeRenderer);
+  world.register("batch", batch);
+  world.register("rects", rects);
+  world.register("obstacles", obstacles);
+  world.register("tileSetsRegions", tileSetsRegions);
+  world.register("gameConfig", gameConfig);
+  world.register("port", port);
+  world.register("layersMapRender", layersMapRender);
+  world.register("mapData", mapData);
+
+  world.addSystem(new ObstaclesSystem(), true);
+  world.addSystem(new PlayerMovementSystem(), true);
+  world.addSystem(new ChangeMapSystem(), true);
+  world.addSystem(new PathFindingSystem(), true);
+  world.addSystem(new EnemySpawningSystem(), true);
+  world.addSystem(new EnemyProcessingSystem(), true);
+  world.addSystem(new PursuitSystem(), true);
+  world.addSystem(new MovementSystem(), true);
+  // world.addSystem(new BulletSpawningSystem(), true);
+  // world.addSystem(new BulletProcessingSystem(), true);
+
+  world.addSystem(new MapRenderingSystem(), false);
+  world.addSystem(new PlayerRenderSystem(), false);
+  world.addSystem(new EnemyRenderSystem(), false);
+  world.addSystem(new BulletRenderSystem(), false);
+
   createGameLoop((delta: number) => {
     gl.clear(gl.COLOR_BUFFER_BIT);
     batch.setProjection(camera.combined);
     shapeRenderer.setProjection(camera.combined);
-    camera.setPosition(posMainCharacter.x, posMainCharacter.y);
-    camera.update();
+    world.setDelta(delta);
 
-    moveMainCharacter(inputHandler, joyStick, posMainCharacter, camera);
-
-    batch.begin();
-
-    for (let i = renderImage.size - 1; i >= 0; i--) {
-      if (
-        Math.abs(posMainCharacter.x - (posMap[i].x + posMap[i].width / 2)) <=
-          1250 &&
-        Math.abs(posMainCharacter.y - (-posMap[i].y + posMap[i].height / 2)) <=
-          1250
-      ) {
-        const texture = renderImage.get(i);
-        if (!texture) continue;
-        batch.draw(
-          texture,
-          posMap[i].x,
-          -posMap[i].y,
-          posMap[i].width,
-          posMap[i].height
-        );
-      }
-    }
-    batch.end();
-
-    shapeRenderer.begin();
-    for (let i = 0; i < renderImage.size; i++) {
-      shapeRenderer.circle(
-        true,
-        posMap[i].x + 1000,
-        -posMap[i].y + 1000,
-        75,
-        Color.BLUE
-      );
-    }
-
-    shapeRenderer.circle(
-      true,
-      joyStick.thumbPos.x,
-      joyStick.thumbPos.y,
-      35,
-      Color.WHITE
-    );
-
-    shapeRenderer.circle(
-      true,
-      posMainCharacter.x,
-      posMainCharacter.y,
-      25,
-      Color.RED
-    );
-    shapeRenderer.end();
+    world.processActiveSystem();
+    world.processPassiveSystem();
   });
 };
 init();

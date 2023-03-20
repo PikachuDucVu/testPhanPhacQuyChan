@@ -13,6 +13,7 @@
     "@types/react-dom": "^18.0.5",
     "box2d.ts": "^1.0.2",
     "buffer": "^6.0.3",
+    "bump-ts": "^0.2.1",
     "flat-ecs": "^2.0.9",
     "gdxts": "^0.1.20",
     "gh-pages": "^4.0.0",
